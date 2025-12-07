@@ -1,60 +1,135 @@
 """
-streamlit_app.py
+streamlit_app.py (robust)
+
+Features:
+- Tries to load model from MODEL_PATH.
+- If not found or loading fails, shows a file uploader so you can upload a saved model (.pkl).
+- Displays helpful errors and lets you run predictions (single or batch) after loading a model from disk or from upload.
 
 Run:
-  streamlit run streamlit_app.py
-
-This simple app:
- - Lets you upload a CSV for batch prediction OR
- - Fill a form for a single prediction
- - Shows predicted label and probability (if available)
+    streamlit run streamlit_app.py
 """
 import streamlit as st
 import pandas as pd
 import pickle
+import io
+import os
+from typing import Optional
 
+# Change this to your preferred default path if you have one
 MODEL_PATH = "best_model.pkl"
 
+st.set_page_config(page_title="Diabetes Prediction", layout="centered")
+
 @st.cache_resource
-def load_model():
-    with open(MODEL_PATH, "rb") as f:
-        return pickle.load(f)
+def load_model_from_bytes(data_bytes: bytes):
+    """Load a model from raw bytes (used for uploaded pickle)."""
+    try:
+        obj = pickle.loads(data_bytes)
+        # support either model directly or a dict with 'model_pipeline' key
+        if isinstance(obj, dict) and 'model_pipeline' in obj:
+            return obj
+        # if user saved only the pipeline, normalize into a dictionary
+        return {"model_pipeline": obj, "numeric_columns": obj.get("numeric_columns", []), "categorical_columns": obj.get("categorical_columns", [])}
+    except Exception as e:
+        raise RuntimeError(f"Failed to load pickle: {e}")
 
-st.title("Diabetes Prediction - Demo")
+@st.cache_resource
+def load_model_from_path(path: str) -> Optional[dict]:
+    """Attempt to load model from path. Returns model dict or None on failure."""
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, "rb") as f:
+            obj = pickle.load(f)
+        if isinstance(obj, dict) and 'model_pipeline' in obj:
+            return obj
+        return {"model_pipeline": obj, "numeric_columns": obj.get("numeric_columns", []), "categorical_columns": obj.get("categorical_columns", [])}
+    except Exception as e:
+        st.error(f"Error loading model from path: {e}")
+        return None
 
-model_pack = load_model()
+st.title("Diabetes Prediction — Inference UI")
 
-choice = st.radio("Choose input type:", ["Single input (form)", "Upload CSV for batch"])
+st.markdown(
+    """
+    App will try to load a model from **`{}`**.  
+    If that fails you can upload a `best_model.pkl` file below (the same file produced by the training script).
+    """.format(MODEL_PATH)
+)
 
-if choice == "Single input (form)":
-    st.write("Fill features below (use appropriate types). Missing fields will be imputed by pipeline.")
-    # attempt to adapt form dynamically if feature names are known:
-    numeric_cols = model_pack.get("numeric_columns", [])
-    categorical_cols = model_pack.get("categorical_columns", [])
+model_pack = load_model_from_path(MODEL_PATH)
 
-    form = {}
-    for c in numeric_cols:
-        form[c] = st.number_input(c, value=float(0) if "age" not in c.lower() else 30.0)
-    for c in categorical_cols:
-        form[c] = st.text_input(c, value="unknown")
+if model_pack is None:
+    st.warning(f"Model not found at `{MODEL_PATH}` or failed to load. Please upload `best_model.pkl` (the pickle created by your training script).")
+    uploaded = st.file_uploader("Upload model `.pkl` file", type=["pkl", "pickle"], accept_multiple_files=False)
+    if uploaded is not None:
+        try:
+            data = uploaded.read()
+            model_pack = load_model_from_bytes(data)
+            st.success("Model uploaded and loaded successfully.")
+        except Exception as e:
+            st.error(f"Failed to load uploaded model: {e}")
+            st.stop()
 
-    if st.button("Predict"):
-        df = pd.DataFrame([form])
-        model = model_pack['model_pipeline']
-        pred = model.predict(df)[0]
-        st.write("Predicted label:", pred)
-        if hasattr(model, "predict_proba"):
-            st.write("Prediction probabilities:", model.predict_proba(df)[0])
+if model_pack is None:
+    st.stop()  # nothing to do
+
+model = model_pack["model_pipeline"]
+numeric_cols = model_pack.get("numeric_columns", [])
+categorical_cols = model_pack.get("categorical_columns", [])
+
+st.write("Model ready. You can do single prediction or batch (CSV upload).")
+
+choice = st.radio("Input type:", ["Single row (form)", "Upload CSV (batch)"])
+
+if choice == "Single row (form)":
+    st.subheader("Single row input")
+    # build a simple form based on known columns; if not known, let user enter manually
+    form_values = {}
+    if numeric_cols or categorical_cols:
+        st.write("Detected feature columns — fill values below (missing fields will be imputed by the pipeline).")
+        for c in numeric_cols:
+            # a better default for age or similar could be implemented heuristically
+            default = 0.0
+            if "age" in c.lower():
+                default = 30.0
+            form_values[c] = st.number_input(c, value=float(default))
+        for c in categorical_cols:
+            form_values[c] = st.text_input(c, value="")
+    else:
+        st.info("Model didn't provide column names. Enter JSON-like input for one row.")
+        raw = st.text_area("Enter one sample as JSON, e.g. {\"age\":45, \"gender\":\"Female\", \"bmi\":27.5}", height=120)
+        if raw:
+            try:
+                import json
+                form_values = json.loads(raw)
+            except Exception as e:
+                st.error(f"Invalid JSON: {e}")
+                form_values = {}
+
+    if st.button("Predict single row"):
+        try:
+            df = pd.DataFrame([form_values])
+            pred = model.predict(df)[0]
+            st.success(f"Predicted label: {pred}")
+            if hasattr(model, "predict_proba"):
+                st.write("Probabilities:", model.predict_proba(df)[0].tolist())
+        except Exception as e:
+            st.error(f"Prediction failed: {e}")
 
 else:
-    uploaded = st.file_uploader("Upload CSV (no target column expected)", type=["csv"])
-    if uploaded is not None:
-        df = pd.read_csv(uploaded)
-        st.write("Preview of uploaded data:", df.head())
-        if st.button("Run batch prediction"):
-            model = model_pack['model_pipeline']
-            preds = model.predict(df)
-            st.write("Predictions (first 50):", preds[:50])
-            if hasattr(model, "predict_proba"):
-                st.write("Probabilities (first 5 rows):")
-                st.write(model.predict_proba(df)[:5])
+    st.subheader("Batch prediction from CSV")
+    uploaded_csv = st.file_uploader("Upload CSV with same features (no target column expected)", type=["csv"])
+    if uploaded_csv is not None:
+        try:
+            df = pd.read_csv(uploaded_csv)
+            st.write("Uploaded data preview:", df.head())
+            if st.button("Run batch prediction"):
+                preds = model.predict(df)
+                st.write("Predictions (first 50):", preds[:50])
+                if hasattr(model, "predict_proba"):
+                    st.write("Probabilities (first 5 rows):")
+                    st.write(model.predict_proba(df)[:5])
+        except Exception as e:
+            st.error(f"Failed to read CSV or run predictions: {e}")
