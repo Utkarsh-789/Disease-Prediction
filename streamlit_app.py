@@ -1,10 +1,10 @@
 # streamlit_app.py
 """
-Simple Diabetes Predictor UI (unchanged)
-Loads:
-  - model_best.pkl
-  - metadata.json
-from the SAME DIRECTORY as this app.
+Simple Diabetes Predictor — simplified result display.
+
+- Loads model_best.pkl and metadata.json from same folder.
+- UI layout preserved.
+- Output: "Diabetes: Yes/No" and "Model accuracy: XX.XX%"
 """
 
 import os
@@ -16,9 +16,6 @@ import pandas as pd
 
 st.set_page_config(page_title="Simple Diabetes Predictor", layout="centered")
 
-# ------------------------------
-# Load model + metadata (same folder)
-# ------------------------------
 MODEL_PATH = "model_best.pkl"
 METADATA_PATH = "metadata.json"
 
@@ -27,7 +24,7 @@ def load_model():
         return None
     try:
         return joblib.load(MODEL_PATH)
-    except:
+    except Exception:
         with open(MODEL_PATH, "rb") as f:
             return pickle.load(f)
 
@@ -36,6 +33,42 @@ def load_metadata():
         return None
     with open(METADATA_PATH, "r") as f:
         return json.load(f)
+
+def pretty_accuracy_from_metadata(meta: dict):
+    """
+    Try to extract a sensible accuracy number from metadata.
+    Priority:
+      1) metrics_at_threshold.accuracy
+      2) metrics_at_0.5.accuracy
+      3) metrics.accuracy
+      4) metrics_at_threshold.roc_auc * 100 (fallback)
+      If nothing, return None.
+    """
+    if not meta:
+        return None
+    for key in ("metrics_at_threshold", "metrics_at_0.5", "metrics"):
+        d = meta.get(key)
+        if isinstance(d, dict):
+            acc = d.get("accuracy")
+            if acc is not None:
+                try:
+                    return float(acc) * 100.0
+                except Exception:
+                    try:
+                        return float(acc)
+                    except Exception:
+                        pass
+    # fallback: use roc_auc if present
+    for key in ("metrics_at_threshold", "metrics_at_0.5", "metrics"):
+        d = meta.get(key)
+        if isinstance(d, dict):
+            roc = d.get("roc_auc")
+            if roc is not None:
+                try:
+                    return float(roc) * 100.0
+                except Exception:
+                    pass
+    return None
 
 model = load_model()
 metadata = load_metadata()
@@ -50,41 +83,31 @@ if metadata is None:
 
 numeric_cols = metadata.get("numeric_columns", [])
 categorical_cols = metadata.get("categorical_columns", [])
-threshold = metadata.get("threshold", 0.5)
+threshold = float(metadata.get("threshold", 0.5))
 
-# ------------------------------
-# UI (exact layout preserved)
-# ------------------------------
 st.title("Simple Diabetes Prediction")
 st.caption("Fill the form below and click Predict")
 
 with st.form("predict_form", clear_on_submit=False):
     col1, col2 = st.columns(2)
 
-    # LEFT SIDE INPUTS
     with col1:
         gender = st.radio("Gender", ["Female", "Male", "Other"], horizontal=True)
         age = st.number_input("Age (years)", min_value=0, max_value=120, value=30, step=1, format="%d")
         hypertension = st.radio("Hypertension", ["No", "Yes"], horizontal=True)
         heart_disease = st.radio("Heart disease", ["No", "Yes"], horizontal=True)
 
-    # RIGHT SIDE INPUTS
     with col2:
         smoking_history = st.selectbox("Smoking history",
                                        ["never", "former", "current", "not current", "unknown"])
         bmi = st.number_input("BMI", value=25.00, min_value=0.0, max_value=100.0, step=0.01, format="%.2f")
         HbA1c_level = st.number_input("HbA1c level (%)", value=5.50, min_value=0.0, max_value=30.0,
                                       step=0.01, format="%.2f")
-        blood_glucose_level = st.number_input("Blood glucose level (mg/dL)",
-                                              value=100.00,
-                                              min_value=0.0, max_value=1000.0,
-                                              step=0.01, format="%.2f")
+        blood_glucose_level = st.number_input("Blood glucose level (mg/dL)", value=100.00,
+                                              min_value=0.0, max_value=1000.0, step=0.01, format="%.2f")
 
     submitted = st.form_submit_button("Predict")
 
-# ------------------------------
-# Prediction
-# ------------------------------
 if submitted:
     input_dict = {
         "gender": gender,
@@ -100,34 +123,45 @@ if submitted:
     df = pd.DataFrame([input_dict])
 
     try:
-        pipeline = model
+        pipeline = model.get("model_pipeline") if isinstance(model, dict) and "model_pipeline" in model else model
 
-        # Predict probability
+        pos_prob = None
         if hasattr(pipeline, "predict_proba"):
-            prob = pipeline.predict_proba(df)[0][1]
+            proba = pipeline.predict_proba(df)[0]
+            # assume binary classification; positive class index 1
+            pos_prob = float(proba[1]) if len(proba) >= 2 else float(max(proba))
+
+        # Determine predicted label using threshold from metadata
+        if pos_prob is not None:
+            pred_label = 1 if pos_prob >= threshold else 0
         else:
-            prob = None
+            pred_label = int(pipeline.predict(df)[0])
 
-        # Use threshold from metadata.json
-        if prob is not None:
-            pred = 1 if prob >= threshold else 0
+        # Simple Yes / No output
+        yes_no = "Yes" if pred_label == 1 else "No"
+
+        # Model accuracy from metadata (percent)
+        acc_pct = pretty_accuracy_from_metadata(metadata)
+
+        # Display clean result
+        st.markdown("### Diabetes")
+        if pred_label == 1:
+            st.markdown(f"<h2 style='color:red'>Yes</h2>", unsafe_allow_html=True)
         else:
-            pred = pipeline.predict(df)[0]
+            st.markdown(f"<h2 style='color:green'>No</h2>", unsafe_allow_html=True)
 
-        result = "Diabetes" if pred == 1 else "No diabetes"
-
-        # Display result
-        st.markdown("### Result")
-        if pred == 1:
-            st.error(f"**{result}** — Probability: {prob*100:.2f}% (threshold {threshold:.2f})")
+        if acc_pct is not None:
+            st.write(f"**Model accuracy:** {acc_pct:.2f}%")
         else:
-            st.success(f"**{result}** — Probability: {prob*100:.2f}% (threshold {threshold:.2f})")
+            st.write("**Model accuracy:** not available in metadata")
 
-        st.markdown("### Input used")
+        # Optionally show the input used (small)
+        st.markdown("**Input used:**")
         st.table(df.T.rename(columns={0: "value"}))
 
-        if prob is not None:
-            st.write("Raw predicted probability:", prob)
+        # If you still want to show probability (commented out by default)
+        # if pos_prob is not None:
+        #     st.write(f"Model confidence (positive class): {pos_prob*100:.2f}% (threshold {threshold:.2f})")
 
     except Exception as e:
         st.error(f"Prediction failed: {e}")
