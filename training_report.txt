@@ -1,0 +1,44 @@
+{
+  "best_params": {
+    "clf__max_depth": 13,
+    "clf__min_samples_leaf": 5,
+    "clf__min_samples_split": 6,
+    "clf__n_estimators": 202
+  },
+  "model": "RandomForestClassifier",
+  "threshold": 0.4200394225060393,
+  "metrics_at_0.5": {
+    "accuracy": 0.9174,
+    "precision": 0.5080753701211306,
+    "recall": 0.888235294117647,
+    "f1": 0.646404109589041,
+    "roc_auc": 0.9762072806171649,
+    "confusion_matrix": [
+      [
+        16838,
+        1462
+      ],
+      [
+        190,
+        1510
+      ]
+    ]
+  },
+  "metrics_at_threshold": {
+    "accuracy": 0.8966,
+    "precision": 0.4475484606613455,
+    "recall": 0.9235294117647059,
+    "f1": 0.6029185867895546,
+    "roc_auc": 0.9762072806171649,
+    "confusion_matrix": [
+      [
+        16362,
+        1938
+      ],
+      [
+        130,
+        1570
+      ]
+    ]
+  }
+}
