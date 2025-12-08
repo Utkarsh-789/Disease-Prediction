@@ -1,245 +1,139 @@
 # streamlit_app.py
 """
-Streamlit app that builds a form from model metadata (or uploaded sample) and runs inference.
-
-Usage:
-  export MODEL_PATH="./best_model.pkl"   # optional
-  streamlit run streamlit_app.py
-
-Requirements:
-  pip install streamlit pandas scikit-learn joblib
+Simple Streamlit UI for single-row diabetes prediction.
+- Age: integer
+- Numeric values: 2 decimal places
+- Gender: radio buttons
+- Human-readable output with probability percent
+- Loads model from ./best_model.pkl or from MODEL_PATH env var
+- If model not found, allows uploading a .pkl file
 """
 
 import os
-import io
 import pickle
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any
 import streamlit as st
 import pandas as pd
 
-st.set_page_config(page_title="Form-based Inference", layout="centered")
+st.set_page_config(page_title="Simple Diabetes Predictor", layout="centered")
 
 MODEL_PATH = os.environ.get("MODEL_PATH", "best_model.pkl")
 
-# ----------------- Utilities -----------------
+# ---- Helpers ----
 def load_model_from_path(path: str) -> Optional[Dict[str, Any]]:
-    """Try to load a model file from disk (pickle or joblib). Return normalized dict or None."""
     if not os.path.exists(path):
         return None
     try:
         with open(path, "rb") as f:
             obj = pickle.load(f)
-    except Exception as e_pickle:
-        # fallback to joblib
-        try:
-            import joblib
-            obj = joblib.load(path)
-        except Exception as e_joblib:
-            st.error(f"Failed to load model from path. pickle error: {e_pickle}; joblib error: {e_joblib}")
-            return None
-    return normalize_model_object(obj)
-
-def load_model_from_bytes(b: bytes) -> Optional[Dict[str, Any]]:
-    """Load a model from uploaded bytes."""
-    try:
-        obj = pickle.loads(b)
-    except Exception as e_pickle:
-        try:
-            import joblib
-            obj = joblib.loads(b)
-        except Exception as e_joblib:
-            st.error(f"Failed to load uploaded model. pickle error: {e_pickle}; joblib error: {e_joblib}")
-            return None
-    return normalize_model_object(obj)
-
-def normalize_model_object(obj: Any) -> Optional[Dict[str, Any]]:
-    """
-    Normalize loaded object into a dict:
-      {"model_pipeline": pipeline_obj, "numeric_columns": [...], "categorical_columns": [...]}
-    """
-    if obj is None:
+    except Exception as e:
+        st.error(f"Failed to load model from {path}: {e}")
         return None
-    if isinstance(obj, dict):
-        if "model_pipeline" in obj:
-            return {
-                "model_pipeline": obj["model_pipeline"],
-                "numeric_columns": obj.get("numeric_columns", []) or [],
-                "categorical_columns": obj.get("categorical_columns", []) or []
-            }
-        if "pipeline" in obj:
-            return {
-                "model_pipeline": obj["pipeline"],
-                "numeric_columns": obj.get("numeric_columns", []) or [],
-                "categorical_columns": obj.get("categorical_columns", []) or []
-            }
-    # assume it's a pipeline object
-    model_pipeline = obj
-    numeric_cols = getattr(obj, "numeric_columns", []) or []
-    categorical_cols = getattr(obj, "categorical_columns", []) or []
-    return {
-        "model_pipeline": model_pipeline,
-        "numeric_columns": numeric_cols,
-        "categorical_columns": categorical_cols
-    }
+    # normalize: support either dict with 'model_pipeline' or raw pipeline
+    if isinstance(obj, dict) and "model_pipeline" in obj:
+        return obj
+    # if pipeline saved directly, try to attach sensible metadata
+    return {"model_pipeline": obj, "numeric_columns": ["age","bmi","HbA1c_level","blood_glucose_level"], "categorical_columns": ["gender","hypertension","heart_disease","smoking_history"]}
 
-def try_predict(model, df: pd.DataFrame):
-    """Run prediction and return (pred, probs) or raise."""
-    pred = model.predict(df)
-    probs = None
-    if hasattr(model, "predict_proba"):
-        try:
-            probs = model.predict_proba(df)
-        except Exception:
-            probs = None
-    return pred, probs
+@st.cache_resource
+def cached_load_model(path: str):
+    return load_model_from_path(path)
 
-# ----------------- App UI -----------------
-st.title("Form-based Inference App")
-st.markdown(
-    "This app builds a form dynamically from your model metadata or a sample CSV and runs prediction for a single row."
-)
-st.write("Model path:", f"`{MODEL_PATH}`")
+def human_label(pred):
+    # adjust based on model's label encoding; common assumption: 1 -> diabetic, 0 -> not
+    if pred == 1 or str(pred) == "1":
+        return "Diabetes"
+    return "No diabetes"
 
-# Try to load model automatically from MODEL_PATH
-model_pack = load_model_from_path(MODEL_PATH)
+# ---- Load model ----
+st.title("Simple Diabetes Prediction")
+st.caption("Fill the form below and click Predict")
+
+model_pack = cached_load_model(MODEL_PATH)
 if model_pack is None:
-    st.warning(f"No model loaded from `{MODEL_PATH}`. You can upload a model (.pkl/.joblib) below or provide sample columns.")
-    col1, col2 = st.columns([1, 1])
-    with col1:
-        uploaded_model = st.file_uploader("Upload model (.pkl or .joblib)", type=["pkl", "pickle", "joblib"], key="upload_model")
-    with col2:
-        st.markdown("**Or** if you already have a model file in the working dir, set `MODEL_PATH` env var and restart.")
-    if uploaded_model is not None:
-        model_pack = load_model_from_bytes(uploaded_model.read())
-        if model_pack is not None:
-            st.success("Model uploaded and loaded successfully.")
-
-if model_pack is None:
-    st.info("If you don't have a model file, upload a small sample CSV (header only) below to build the form (no model required).")
-    sample_csv = st.file_uploader("Upload sample CSV (for inferring form fields)", type=["csv"], key="upload_sample")
-    inferred_numeric_cols: List[str] = []
-    inferred_categorical_cols: List[str] = []
-    if sample_csv is not None:
+    st.warning(f"Model not found at `{MODEL_PATH}`. Upload a model (.pkl) or place the file next to this app.")
+    uploaded = st.file_uploader("Upload model file (.pkl)", type=["pkl","pickle"], accept_multiple_files=False)
+    if uploaded is not None:
         try:
-            sample_df = pd.read_csv(sample_csv, nrows=5)
-            st.write("Sample preview (first 5 rows):")
-            st.dataframe(sample_df.head())
-            # infer numeric vs categorical by dtype
-            inferred_numeric_cols = sample_df.select_dtypes(include=["number"]).columns.tolist()
-            inferred_categorical_cols = sample_df.select_dtypes(exclude=["number"]).columns.tolist()
-            st.success("Inferred columns from uploaded CSV.")
-        except Exception as e:
-            st.error(f"Failed to read uploaded CSV: {e}")
-    else:
-        # allow manual paste of column names
-        st.markdown("Alternatively, paste comma-separated column names below (the last column will be assumed the target unless you specify otherwise).")
-        col_input = st.text_area("Comma-separated feature column names (exclude target column)", value="", help="e.g. gender,age,hypertension,heart_disease,smoking_history,bmi,HbA1c_level,blood_glucose_level")
-        if col_input.strip():
-            names = [c.strip() for c in col_input.split(",") if c.strip()]
-            # ask which are numeric
-            if names:
-                st.markdown("Mark which of these are numeric (others will be treated as categorical).")
-                numeric_selected = []
-                for name in names:
-                    is_num = st.checkbox(f"{name} (numeric)", key=f"num_{name}")
-                    if is_num:
-                        numeric_selected.append(name)
-                inferred_numeric_cols = numeric_selected
-                inferred_categorical_cols = [n for n in names if n not in numeric_selected]
-
-    # If we got columns either from CSV or manual, build the form
-    if inferred_numeric_cols or inferred_categorical_cols:
-        st.markdown("### Generated form (from sample columns)")
-        form_values = {}
-        with st.form("generated_form"):
-            for c in inferred_numeric_cols:
-                default = 30.0 if "age" in c.lower() else 0.0
-                form_values[c] = st.number_input(label=c, value=float(default))
-            for c in inferred_categorical_cols:
-                form_values[c] = st.text_input(label=c, value="")
-            submit = st.form_submit_button("Predict from generated form")
-        if submit:
-            if 'model_pipeline' in (model_pack or {}):
-                model = model_pack["model_pipeline"]
-                try:
-                    df_in = pd.DataFrame([form_values])
-                    pred, probs = try_predict(model, df_in)
-                    st.success(f"Predicted label: {pred[0]}")
-                    if probs is not None:
-                        st.write("Probabilities:", probs[0].tolist())
-                except Exception as e:
-                    st.error(f"Prediction failed (model present but error): {e}")
+            model_bytes = uploaded.read()
+            model_obj = pickle.loads(model_bytes)
+            if isinstance(model_obj, dict) and "model_pipeline" in model_obj:
+                model_pack = model_obj
             else:
-                st.error("No model loaded for prediction. Upload a model to enable prediction.")
-    else:
-        st.info("Upload a CSV or paste column names to generate the input form.")
-    st.stop()  # done in case no model_pack loaded
-
-# If we get here, a model is loaded
-model = model_pack["model_pipeline"]
-numeric_cols = model_pack.get("numeric_columns", []) or []
-categorical_cols = model_pack.get("categorical_columns", []) or []
-
-st.success("Model loaded successfully.")
-st.subheader("Model metadata")
-st.write("Numeric columns:", numeric_cols if numeric_cols else "—")
-st.write("Categorical columns:", categorical_cols if categorical_cols else "—")
-
-# If metadata is missing, let user upload a CSV or paste columns to create the form
-if not numeric_cols and not categorical_cols:
-    st.info("Model does not provide column metadata. Upload a sample CSV or paste column names to build the form.")
-    sample_csv2 = st.file_uploader("Upload sample CSV (to infer columns)", type=["csv"], key="sample2")
-    inferred_numeric_cols = []
-    inferred_categorical_cols = []
-    if sample_csv2 is not None:
-        try:
-            sample_df = pd.read_csv(sample_csv2, nrows=5)
-            inferred_numeric_cols = sample_df.select_dtypes(include=["number"]).columns.tolist()
-            inferred_categorical_cols = sample_df.select_dtypes(exclude=["number"]).columns.tolist()
-            st.success("Inferred columns from sample CSV.")
+                model_pack = {"model_pipeline": model_obj,
+                              "numeric_columns": ["age","bmi","HbA1c_level","blood_glucose_level"],
+                              "categorical_columns": ["gender","hypertension","heart_disease","smoking_history"]}
+            st.success("Model uploaded and loaded.")
         except Exception as e:
-            st.error(f"Failed to read CSV: {e}")
-    col_input2 = st.text_area("Or paste comma-separated column names:", value="")
-    if col_input2.strip():
-        names = [c.strip() for c in col_input2.split(",") if c.strip()]
-        # ask user which names are numeric
-        numeric_selected = []
-        if names:
-            st.markdown("Tick which of these are numeric:")
-            for name in names:
-                if st.checkbox(name + " (numeric)", key=f"meta_num_{name}"):
-                    numeric_selected.append(name)
-            inferred_numeric_cols = numeric_selected
-            inferred_categorical_cols = [n for n in names if n not in numeric_selected]
-    # update lists
-    if not inferred_numeric_cols and not inferred_categorical_cols:
-        st.stop()
-    numeric_cols = inferred_numeric_cols
-    categorical_cols = inferred_categorical_cols
+            st.error(f"Failed to load uploaded model: {e}")
+            st.stop()
 
-# Build the form from numeric_cols and categorical_cols
-st.markdown("### Input form — enter feature values")
-form_values = {}
-with st.form("input_form"):
-    # numeric inputs
-    for c in numeric_cols:
-        default = 30.0 if "age" in c.lower() else 0.0
-        form_values[c] = st.number_input(label=c, value=float(default), format="%.6f", key=f"n_{c}")
-    # categorical inputs
-    for c in categorical_cols:
-        form_values[c] = st.text_input(label=c, value="", key=f"c_{c}")
+# stop here if still no model
+if model_pack is None:
+    st.stop()
+
+model = model_pack["model_pipeline"]
+
+# ---- Simple form ----
+with st.form("predict_form", clear_on_submit=False):
+    col1, col2 = st.columns(2)
+    with col1:
+        gender = st.radio("Gender", options=["Female", "Male", "Other"], horizontal=True)
+        age = st.number_input("Age (years)", min_value=0, max_value=120, value=30, step=1, format="%d")
+        hypertension = st.radio("Hypertension", options=["No", "Yes"], index=0, horizontal=True)
+        heart_disease = st.radio("Heart disease", options=["No", "Yes"], index=0, horizontal=True)
+    with col2:
+        smoking_history = st.selectbox("Smoking history", options=["never", "former", "current", "not current", "unknown"], index=0)
+        bmi = st.number_input("BMI", min_value=0.0, max_value=100.0, value=25.00, step=0.01, format="%.2f")
+        HbA1c_level = st.number_input("HbA1c level (%)", min_value=0.0, max_value=30.0, value=5.50, step=0.01, format="%.2f")
+        blood_glucose_level = st.number_input("Blood glucose level (mg/dL)", min_value=0.0, max_value=1000.0, value=100.00, step=0.01, format="%.2f")
+
     submitted = st.form_submit_button("Predict")
 
+# ---- Prediction and display ----
 if submitted:
-    # Build dataframe and predict
+    # Normalize yes/no to 0/1 if model expects integers
     try:
-        input_df = pd.DataFrame([form_values])
-        pred, probs = try_predict(model, input_df)
-        st.success(f"Predicted label: {pred[0]}")
-        if probs is not None:
-            st.write("Probabilities:", probs[0].tolist())
-        st.write("Input used for prediction:")
-        st.dataframe(input_df.T.rename(columns={0: "value"}))
+        input_dict = {
+            "gender": gender,
+            "age": int(age),
+            "hypertension": 1 if hypertension == "Yes" else 0,
+            "heart_disease": 1 if heart_disease == "Yes" else 0,
+            "smoking_history": smoking_history,
+            "bmi": float(round(bmi, 2)),
+            "HbA1c_level": float(round(HbA1c_level, 2)),
+            "blood_glucose_level": float(round(blood_glucose_level, 2))
+        }
+
+        df = pd.DataFrame([input_dict])
+
+        # Predict
+        pred = model.predict(df)[0]
+        prob = None
+        if hasattr(model, "predict_proba"):
+            try:
+                prob_arr = model.predict_proba(df)[0]
+                # choose probability of positive class; assume class order [0,1]
+                if len(prob_arr) == 2:
+                    prob = prob_arr[1]
+                else:
+                    # fallback: show max prob
+                    prob = max(prob_arr)
+            except Exception:
+                prob = None
+
+        # Human readable output
+        label = human_label(pred)
+        st.markdown("### Result")
+        st.write(f"**Prediction:** {label}")
+        if prob is not None:
+            st.write(f"**Confidence:** {prob*100:.2f}%")
+        else:
+            st.write("**Confidence:** not available")
+
+        st.markdown("**Input used:**")
+        st.table(pd.DataFrame(input_dict, index=["value"]).T)
+
     except Exception as e:
         st.error(f"Prediction failed: {e}")
         st.exception(e)
